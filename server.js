@@ -15,7 +15,7 @@ const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.c
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
 const SHOW_REASONING = false;
-const ENABLE_THINKING_MODE = false;
+const ENABLE_THINKING_MODE = true;
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
