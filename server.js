@@ -16,11 +16,11 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
 // Can be controlled via Railway environment variable: SHOW_REASONING=true
-const SHOW_REASONING = true;
+const SHOW_REASONING = false;
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
 // Can be controlled via Railway environment variable: ENABLE_THINKING_MODE=true
-const ENABLE_THINKING_MODE = true;
+const ENABLE_THINKING_MODE = false;
 
 // 🔒 MODELS WITH THINKING ALWAYS DISABLED (never send thinking parameter)
 // These models don't support thinking mode or perform worse with it enabled
