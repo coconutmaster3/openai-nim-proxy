@@ -27,7 +27,7 @@ const ENABLE_THINKING_MODE = true;
 const DISABLED_THINKING_MODELS = [
   'glm5',
   'deepseek-v3.2',
-  'moonshotai/kimi-k2-thinking'
+  'moonshotai/kimi-k2-thinking',
   'mistral-large-3-675b-instruct-2512'
 ];
 
