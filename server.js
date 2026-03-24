@@ -41,13 +41,13 @@ const MODEL_MAPPING = {
   'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
   // 🔥 NOVOS MODELOS COM THINKING
-  'kimi-thinking': 'moonshotai/kimi-k2-thinking',
-  'qwen-thinking': 'qwen/qwen3-next-80b-a3b-thinking',
+  'davinci002': 'moonshotai/kimi-k2-thinking',
+  'gpt4o': 'qwen/qwen3-next-80b-a3b-thinking',
   'deepseek-thinking': 'deepseek-ai/deepseek-v3.1',
   // 🔥 OUTROS MODELOS POPULARES
   'llama-405b': 'meta/llama-3.1-405b-instruct',
   'llama-70b': 'meta/llama-3.1-70b-instruct',
-  'mistral-large': 'mistralai/mistral-large-2-instruct'
+  'gpt-4': 'mistralai/mistral-large-2-instruct'
 };
 
 // Health check endpoint
