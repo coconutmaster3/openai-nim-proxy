@@ -16,11 +16,11 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
 // Can be controlled via Railway environment variable: SHOW_REASONING=true
-const SHOW_REASONING = false;
+const SHOW_REASONING = true;
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
 // Can be controlled via Railway environment variable: ENABLE_THINKING_MODE=true
-const ENABLE_THINKING_MODE = false;
+const ENABLE_THINKING_MODE = true;
 
 // 🔒 MODELS WITH THINKING ALWAYS DISABLED (never send thinking parameter)
 // These models don't support thinking mode or perform worse with it enabled
@@ -28,7 +28,8 @@ const DISABLED_THINKING_MODELS = [
   'glm5',
   'deepseek-v3.2',
   'moonshotai/kimi-k2-thinking',
-  'mistral-large-3-675b-instruct-2512'
+  'mistral-large-3-675b-instruct-2512',
+  'gpt-4'
 ];
 
 // Model mapping (adjust based on available NIM models)
