@@ -41,7 +41,7 @@ const MODEL_MAPPING = {
   'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
+  'gemma': 'gemma-4-31b-it',
   // 🔥 NOVOS MODELOS COM THINKING
   'glm5': 'glm5',
   'qwen': 'qwen/qwen3-next-80b-a3b-thinking',
