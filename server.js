@@ -25,15 +25,15 @@ const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true';
 
 const MODELS = [
-  'nemotron-3-super-120b-a12b',
+  'nvidia/nemotron-3-super-120b-a12b',
   'gemma-4-31b-it',
-  'kimi-k2.5',
-  'deepseek-v3.2',
+  'moonshotai/kimi-k2.5',
+  'deepseek-ai/deepseek-v3.2',
   'moonshotai/kimi-k2-thinking',
   'qwen3-next-80b-a3b-instruct',
   'qwen3.5-397b-a17b',
-  'llama-3.3-70b-instruct',
-  'llama-3.1-8b-instruct'
+  'meta/llama-3.3-70b-instruct',
+  'meta/llama-3.1-8b-instruct'
 ];
 
 // ── Error message extraction ──
