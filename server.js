@@ -1,4 +1,3 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy (Fixed for Janitor AI & Chub AI)
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -8,8 +7,11 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
+  allowedHeaders: '*',
+  exposedHeaders: '*',
+  maxAge: 86400,
+  credentials: false
 }));
 app.use(express.json({ limit: '10mb' }));
 app.options('*', cors());
@@ -24,67 +26,44 @@ if (!NIM_API_KEY) {
 const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true';
 
+// Use your full prefixed model IDs that Janitor is already happy with
 const MODELS = [
-  'nvidia/nemotron-3-super-120b-a12b',
-  'gemma-4-31b-it',
-  'moonshotai/kimi-k2.5',
-  'deepseek-ai/deepseek-v3.2',
-  'moonshotai/kimi-k2-thinking',
-  'qwen3-next-80b-a3b-instruct',
-  'qwen3.5-397b-a17b',
   'meta/llama-3.3-70b-instruct',
-  'meta/llama-3.1-8b-instruct'
+  'meta/llama-3.1-8b-instruct',
+  'moonshotai/kimi-k2-thinking',
+  'moonshotai/kimi-k2-instruct',
+  'deepseek-ai/deepseek-v3.2',
+  'deepseek-ai/deepseek-r1',
+  'nvidia/llama-3.1-nemotron-70b-instruct',
+  'google/gemma-4-31b-it',
+  'qwen/qwen3-next-80b-a3b-instruct',
+  'qwen/qwen3.5-397b-a17b',
 ];
 
-// ── Error message extraction ──
-// CRITICAL: Never stringifies raw error objects or streams.
-// Pulls only known safe fields. Returns a short plain string.
-
 function extractErrorMessage(err) {
-  // When responseType is 'stream', err.response.data is a readable stream,
-  // NOT parsed data. Detect via .pipe (duck-type) and skip it entirely.
   if (err.response?.data && typeof err.response.data.pipe === 'function') {
-    const url = err.config?.url || 'upstream';
-    return `${err.response.status} ${err.response.statusText} from ${url}`;
+    return `${err.response.status} ${err.response.statusText} from ${err.config?.url || 'upstream'}`;
   }
-
   if (err.response?.data) {
     const d = err.response.data;
-    // text/plain response → string
     if (typeof d === 'string') return d.trim().slice(0, 500);
-    // JSON error object
     if (typeof d === 'object' && d !== null) {
-      const msg = d.message
-        || d.error?.message
-        || d.detail
-        || d.msg
+      const msg = d.message || d.error?.message || d.detail || d.msg
         || (d.error && typeof d.error === 'string' ? d.error : null);
       if (msg) return String(msg).slice(0, 500);
-      // No recognizable message field — don't guess, just return status
       return `${err.response.status} ${err.response.statusText}`;
     }
     return String(d).slice(0, 500);
   }
-
-  // Network / timeout errors (no response received)
   if (err.code) return `${err.code}: ${err.message || 'unknown'}`;
   return (err.message || 'Unknown error').slice(0, 500);
 }
 
-// ── Request logging ──
 app.use('/v1/chat/completions', (req, res, next) => {
   console.log(`─── Incoming request ───`);
   console.log(`Model: ${req.body?.model || 'NONE'}`);
   console.log(`Stream: ${req.body?.stream}`);
   console.log(`Messages: ${req.body?.messages?.length || 0} messages`);
-  const extras = Object.keys(req.body || {}).filter(k =>
-    !['model', 'messages', 'stream', 'temperature', 'top_p', 'max_tokens',
-      'max_completion_tokens', 'stop', 'presence_penalty', 'frequency_penalty',
-      'seed', 'repetition_penalty'].includes(k)
-  );
-  if (extras.length > 0) {
-    console.log(`Stripping unsupported params: ${extras.join(', ')}`);
-  }
   next();
 });
 
@@ -122,7 +101,6 @@ function sendError(res, status, message, type = 'proxy_error') {
   }
 }
 
-// ── Main completion endpoint ──
 app.post('/v1/chat/completions', async (req, res) => {
   const startTime = Date.now();
 
@@ -134,10 +112,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       return sendError(res, 400, 'messages is required', 'invalid_request_error');
     }
 
-    let nimModel = model;
-    if (model === 'kimi-k2-thinking') nimModel = 'moonshotai/kimi-k2-thinking';
-
-    const nimBody = { model: nimModel, messages, stream };
+    const nimBody = { model, messages, stream };
     for (const key of ALLOWED_PARAMS) {
       if (key === 'model' || key === 'messages' || key === 'stream') continue;
       if (req.body[key] !== undefined) nimBody[key] = req.body[key];
@@ -157,7 +132,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       'Authorization': `Bearer ${NIM_API_KEY}`,
     };
 
-    // ── Streaming ──
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -168,7 +142,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimBody, {
           headers, responseType: 'stream', timeout: 300000,
         });
-
         console.log(`✅ Stream connected in ${Date.now() - startTime}ms`);
 
         response.data.on('data', (chunk) => {
@@ -208,29 +181,19 @@ app.post('/v1/chat/completions', async (req, res) => {
         const msg = extractErrorMessage(err);
         console.error(`❌ Stream setup failed after ${elapsed}ms [${status}]: ${msg}`);
 
-        if (status === 404) {
-          sendError(res, 404,
-            `Model '${model}' not found on NVIDIA NIM. Available: ${MODELS.join(', ')}`,
-            'model_not_found');
-        } else if (status === 401) {
-          sendError(res, 401, 'Invalid NIM API key', 'authentication_error');
-        } else if (status === 429) {
-          sendError(res, 429, 'NIM rate limit exceeded. Try again later.', 'rate_limit_error');
-        } else {
-          sendError(res, status, `NIM error: ${msg}`, 'upstream_error');
-        }
+        if (status === 404) sendError(res, 404, `Model '${model}' not found on NVIDIA NIM.`, 'model_not_found');
+        else if (status === 401) sendError(res, 401, 'Invalid NIM API key', 'authentication_error');
+        else if (status === 429) sendError(res, 429, 'Rate limit exceeded.', 'rate_limit_error');
+        else sendError(res, status, `NIM error: ${msg}`, 'upstream_error');
       }
 
-    // ── Non-streaming ──
     } else {
       const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimBody, {
         headers, timeout: 300000,
       });
-
       console.log(`✅ Non-stream done in ${Date.now() - startTime}ms`);
 
       let data = response.data;
-
       if (!SHOW_REASONING && data.choices) {
         data.choices = data.choices.map(choice => {
           if (choice.message?.reasoning_content) delete choice.message.reasoning_content;
@@ -241,7 +204,6 @@ app.post('/v1/chat/completions', async (req, res) => {
           delete data.usage.prompt_tokens_details.reasoning_tokens;
         }
       }
-
       res.json(data);
     }
 
@@ -251,17 +213,10 @@ app.post('/v1/chat/completions', async (req, res) => {
     const msg = extractErrorMessage(err);
     console.error(`❌ Request failed after ${elapsed}ms [${status}]: ${msg}`);
 
-    if (status === 404) {
-      sendError(res, 404,
-        `Model '${req.body?.model}' not found on NVIDIA NIM. Available: ${MODELS.join(', ')}`,
-        'model_not_found');
-    } else if (status === 401) {
-      sendError(res, 401, 'Invalid NIM API key', 'authentication_error');
-    } else if (status === 429) {
-      sendError(res, 429, 'NIM rate limit exceeded. Try again later.', 'rate_limit_error');
-    } else {
-      sendError(res, status, `Proxy error: ${msg}`, 'proxy_error');
-    }
+    if (status === 404) sendError(res, 404, `Model '${req.body?.model}' not found on NVIDIA NIM.`, 'model_not_found');
+    else if (status === 401) sendError(res, 401, 'Invalid NIM API key', 'authentication_error');
+    else if (status === 429) sendError(res, 429, 'Rate limit exceeded.', 'rate_limit_error');
+    else sendError(res, status, `Proxy error: ${msg}`, 'proxy_error');
   }
 });
 
@@ -269,7 +224,6 @@ app.use('*', (req, res) => {
   res.status(404).json({ error: { message: 'Not found', type: 'not_found' } });
 });
 
-// ── Server startup ──
 function startServer(retries = 5, delay = 3000) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
@@ -294,15 +248,8 @@ function startServer(retries = 5, delay = 3000) {
     }
   });
 
-  process.on('SIGTERM', () => {
-    console.log('SIGTERM received, shutting down...');
-    server.close(() => process.exit(0));
-  });
-
-  process.on('SIGINT', () => {
-    console.log('SIGINT received, shutting down...');
-    server.close(() => process.exit(0));
-  });
+  process.on('SIGTERM', () => { console.log('SIGTERM received, shutting down...'); server.close(() => process.exit(0)); });
+  process.on('SIGINT', () => { console.log('SIGINT received, shutting down...'); server.close(() => process.exit(0)); });
 }
 
 startServer();
