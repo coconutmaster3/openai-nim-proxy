@@ -6,7 +6,6 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -15,7 +14,6 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.options('*', cors());
 
-// NVIDIA NIM API configuration
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
@@ -23,11 +21,9 @@ if (!NIM_API_KEY) {
   console.error('⚠️  NIM_API_KEY environment variable is not set!');
 }
 
-// Toggles
 const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true';
 
-// Available models
 const MODELS = [
   'nemotron-3-super-120b-a12b',
   'gemma-4-31b-it',
@@ -40,7 +36,22 @@ const MODELS = [
   'llama-3.1-8b-instruct'
 ];
 
-// Health check endpoint
+// Request logging middleware
+app.use('/v1/chat/completions', (req, res, next) => {
+  console.log(`─── Incoming request ───`);
+  console.log(`Model: ${req.body?.model || 'NONE'}`);
+  console.log(`Stream: ${req.body?.stream}`);
+  console.log(`Messages: ${req.body?.messages?.length || 0} messages`);
+  // Log any extra params Chub is sending
+  const extras = Object.keys(req.body || {}).filter(k =>
+    !['model', 'messages', 'stream', 'temperature', 'top_p', 'max_tokens', 'stop', 'presence_penalty', 'frequency_penalty'].includes(k)
+  );
+  if (extras.length > 0) {
+    console.log(`Stripping unsupported params: ${extras.join(', ')}`);
+  }
+  next();
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -50,7 +61,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// OpenAI-compatible /v1/models
 app.get('/v1/models', (req, res) => {
   res.json({
     object: 'list',
@@ -66,28 +76,53 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-// OpenAI-compatible /v1/chat/completions
+// Params that NVIDIA NIM actually supports
+const ALLOWED_PARAMS = [
+  'model', 'messages', 'stream', 'temperature', 'top_p',
+  'max_tokens', 'max_completion_tokens', 'stop', 'seed',
+  'frequency_penalty', 'presence_penalty', 'repetition_penalty',
+  'reasoning_effort'
+];
+
 app.post('/v1/chat/completions', async (req, res) => {
+  const startTime = Date.now();
+
   try {
-    const { model, messages, stream = false, temperature, top_p, max_tokens, stop, presence_penalty, frequency_penalty } = req.body;
+    const { model, messages, stream = false } = req.body;
 
     if (!model) {
+      console.error('❌ No model provided');
       return res.status(400).json({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
 
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      console.error('❌ No messages provided');
+      return res.status(400).json({ error: { message: 'messages is required', type: 'invalid_request_error' } });
+    }
+
+    // Build clean body — ONLY include params NIM supports
     let nimModel = model;
     if (model === 'kimi-k2-thinking') {
       nimModel = 'moonshotai/kimi-k2-thinking';
     }
 
     const nimBody = { model: nimModel, messages, stream };
-    if (temperature !== undefined) nimBody.temperature = temperature;
-    if (top_p !== undefined) nimBody.top_p = top_p;
-    if (max_tokens !== undefined) nimBody.max_tokens = max_tokens;
-    if (stop !== undefined) nimBody.stop = stop;
-    if (presence_penalty !== undefined) nimBody.presence_penalty = presence_penalty;
-    if (frequency_penalty !== undefined) nimBody.frequency_penalty = frequency_penalty;
 
+    // Copy only allowed params
+    for (const key of ALLOWED_PARAMS) {
+      if (key === 'model' || key === 'messages' || key === 'stream') continue;
+      if (req.body[key] !== undefined) {
+        nimBody[key] = req.body[key];
+      }
+    }
+
+    // Normalize max_tokens (Chub sometimes sends max_completion_tokens)
+    if (nimBody.max_completion_tokens && !nimBody.max_tokens) {
+      nimBody.max_tokens = nimBody.max_completion_tokens;
+      delete nimBody.max_completion_tokens;
+    }
+
+    // Thinking mode
     if (ENABLE_THINKING_MODE && (model.includes('thinking') || model.includes('deepseek-r1'))) {
       nimBody.reasoning_effort = 'high';
     }
@@ -98,6 +133,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     };
 
     if (stream) {
+      // ─── Streaming ───
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -109,6 +145,8 @@ app.post('/v1/chat/completions', async (req, res) => {
           responseType: 'stream',
           timeout: 300000,
         });
+
+        console.log(`✅ Stream connected to NIM in ${Date.now() - startTime}ms`);
 
         response.data.on('data', (chunk) => {
           const raw = chunk.toString();
@@ -131,12 +169,13 @@ app.post('/v1/chat/completions', async (req, res) => {
         });
 
         response.data.on('end', () => {
+          console.log(`✅ Stream completed in ${Date.now() - startTime}ms`);
           res.write('data: [DONE]\n\n');
           res.end();
         });
 
         response.data.on('error', (err) => {
-          console.error('Stream error from NIM:', err.message);
+          console.error(`❌ Stream error after ${Date.now() - startTime}ms:`, err.message);
           if (!res.headersSent) {
             res.status(502).json({ error: { message: 'Upstream stream error' } });
           } else {
@@ -145,19 +184,26 @@ app.post('/v1/chat/completions', async (req, res) => {
         });
 
       } catch (err) {
-        console.error('Stream setup error:', err.message);
+        const elapsed = Date.now() - startTime;
+        console.error(`❌ Stream setup failed after ${elapsed}ms:`, err.code, err.message);
+        if (err.response) {
+          console.error(`   NIM returned ${err.response.status}:`, JSON.stringify(err.response.data).slice(0, 200));
+        }
         if (!res.headersSent) {
-          res.status(502).json({ error: { message: 'Failed to connect to NIM' } });
+          res.status(502).json({ error: { message: `Failed to connect to NIM: ${err.message}` } });
         } else {
           res.end();
         }
       }
 
     } else {
+      // ─── Non-streaming ───
       const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimBody, {
         headers,
         timeout: 300000,
       });
+
+      console.log(`✅ Non-stream completed in ${Date.now() - startTime}ms`);
 
       let data = response.data;
 
@@ -176,8 +222,10 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
   } catch (err) {
-    console.error('Completions error:', err.message);
+    const elapsed = Date.now() - startTime;
+    console.error(`❌ Request failed after ${elapsed}ms:`, err.code || 'UNKNOWN', err.message);
     if (err.response) {
+      console.error(`   NIM returned ${err.response.status}:`, JSON.stringify(err.response.data).slice(0, 300));
       res.status(err.response.status).json(err.response.data);
     } else {
       res.status(500).json({ error: { message: err.message, type: 'proxy_error' } });
@@ -185,12 +233,11 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// Catch-all 404
 app.use('*', (req, res) => {
   res.status(404).json({ error: { message: 'Not found', type: 'not_found' } });
 });
 
-// ─── Start server with retry logic for EADDRINUSE ───
+// Start with retry
 function startServer(retries = 5, delay = 3000) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
@@ -206,7 +253,7 @@ function startServer(retries = 5, delay = 3000) {
         server.close();
         setTimeout(() => startServer(retries - 1, delay), delay);
       } else {
-        console.error(`❌ Port ${PORT} still in use after all retries. Giving up.`);
+        console.error(`❌ Port ${PORT} still in use after all retries.`);
         process.exit(1);
       }
     } else {
@@ -215,7 +262,6 @@ function startServer(retries = 5, delay = 3000) {
     }
   });
 
-  // Graceful shutdown
   process.on('SIGTERM', () => {
     console.log('SIGTERM received, shutting down...');
     server.close(() => process.exit(0));
