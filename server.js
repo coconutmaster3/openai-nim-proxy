@@ -4,6 +4,7 @@ const cors = require('cors');
 const axios = require('axios');
 
 const app = express();
+// Render provides PORT env var — ALWAYS use it, never hardcode a fallback on Render
 const PORT = process.env.PORT || 3000;
 
 // Middleware
@@ -13,8 +14,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 app.use(express.json({ limit: '10mb' }));
-
-// Handle preflight
 app.options('*', cors());
 
 // NVIDIA NIM API configuration
@@ -44,15 +43,204 @@ const MODELS = [
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     service: 'OpenAI to NVIDIA NIM Proxy',
     reasoning_display: SHOW_REASONING,
     thinking_mode: ENABLE_THINKING_MODE
   });
 });
 
-// Root endpoint - some platforms check this
+// ─── OpenAI-compatible /v1/models ───
+app.get('/v1/models', (req, res) => {
+  res.json({
+    object: 'list',
+    data: MODELS.map(id => ({
+      id,
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'nvidia',
+      permission: [],
+      root: id,
+      parent: null
+    }))
+  });
+});
+
+// ─── OpenAI-compatible /v1/chat/completions ───
+app.post('/v1/chat/completions', async (req, res) => {
+  try {
+    const { model, messages, stream = false, temperature, top_p, max_tokens, stop, presence_penalty, frequency_penalty } = req.body;
+
+    if (!model) {
+      return res.status(400).json({ error: { message: 'model is required', type: 'invalid_request_error' } });
+    }
+
+    // Map model name if needed
+    let nimModel = model;
+    // If user sends just "kimi-k2-thinking" without org prefix, add it
+    if (model === 'kimi-k2-thinking') {
+      nimModel = 'moonshotai/kimi-k2-thinking';
+    }
+
+    // Build request body for NVIDIA NIM
+    const nimBody = {
+      model: nimModel,
+      messages,
+      stream,
+    };
+
+    if (temperature !== undefined) nimBody.temperature = temperature;
+    if (top_p !== undefined) nimBody.top_p = top_p;
+    if (max_tokens !== undefined) nimBody.max_tokens = max_tokens;
+    if (stop !== undefined) nimBody.stop = stop;
+    if (presence_penalty !== undefined) nimBody.presence_penalty = presence_penalty;
+    if (frequency_penalty !== undefined) nimBody.frequency_penalty = frequency_penalty;
+
+    // Thinking mode: add reasoning_effort for supported models
+    if (ENABLE_THINKING_MODE && (model.includes('thinking') || model.includes('deepseek-r1'))) {
+      nimBody.reasoning_effort = 'high';
+    }
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${NIM_API_KEY}`,
+    };
+
+    if (stream) {
+      // ─── Streaming response ───
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+
+      try {
+        const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimBody, {
+          headers,
+          responseType: 'stream',
+          timeout: 300000,
+        });
+
+        response.data.on('data', (chunk) => {
+          const raw = chunk.toString();
+          // Filter out reasoning tokens if SHOW_REASONING is false
+          if (!SHOW_REASONING) {
+            const lines = raw.split('\n').filter(line => {
+              if (!line.startsWith('data: ')) return true;
+              const data = line.slice(6).trim();
+              if (data === '[DONE]') return true;
+              try {
+                const parsed = JSON.parse(data);
+                // Skip reasoning deltas
+                if (parsed.choices?.[0]?.delta?.reasoning_content) return false;
+                if (parsed.choices?.[0]?.delta?.reasoning) return false;
+              } catch (e) { /* pass through unparseable lines */ }
+              return true;
+            });
+            const filtered = lines.join('\n') + '\n';
+            res.write(filtered);
+          } else {
+            res.write(raw);
+          }
+        });
+
+        response.data.on('end', () => {
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+
+        response.data.on('error', (err) => {
+          console.error('Stream error from NIM:', err.message);
+          if (!res.headersSent) {
+            res.status(502).json({ error: { message: 'Upstream stream error', type: 'upstream_error' } });
+          } else {
+            res.end();
+          }
+        });
+
+      } catch (err) {
+        console.error('Stream setup error:', err.message);
+        if (!res.headersSent) {
+          res.status(502).json({ error: { message: 'Failed to connect to NIM', type: 'upstream_error' } });
+        } else {
+          res.end();
+        }
+      }
+
+    } else {
+      // ─── Non-streaming response ───
+      const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimBody, {
+        headers,
+        timeout: 300000,
+      });
+
+      let data = response.data;
+
+      // Filter reasoning content if not showing
+      if (!SHOW_REASONING && data.choices) {
+        data.choices = data.choices.map(choice => {
+          // Remove reasoning_content from message
+          if (choice.message?.reasoning_content) {
+            delete choice.message.reasoning_content;
+          }
+          if (choice.message?.reasoning) {
+            delete choice.message.reasoning;
+          }
+          return choice;
+        });
+        // Remove usage.prompt_tokens_details if it contains reasoning info
+        if (data.usage?.prompt_tokens_details?.reasoning_tokens !== undefined) {
+          delete data.usage.prompt_tokens_details.reasoning_tokens;
+        }
+      }
+
+      res.json(data);
+    }
+
+  } catch (err) {
+    console.error('Completions error:', err.message);
+    if (err.response) {
+      res.status(err.response.status).json(err.response.data);
+    } else {
+      res.status(500).json({ error: { message: err.message, type: 'proxy_error' } });
+    }
+  }
+});
+
+// ─── Catch-all 404 ───
+app.use('*', (req, res) => {
+  res.status(404).json({ error: { message: 'Not found', type: 'not_found' } });
+});
+
+// ─── Start server with proper error handling ───
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+  console.log(`   Health check: http://localhost:${PORT}/health`);
+  console.log(`   Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`   Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`❌ Port ${PORT} is already in use. Kill the existing process or change PORT.`);
+    // On Render, this usually means a stale process — force exit so Render can retry cleanly
+    process.exit(1);
+  } else {
+    console.error('Server error:', err);
+    process.exit(1);
+  }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down...');
+  server.close(() => process.exit(0));
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down...');
+  server.close(() => process.exit(0));
+});// Root endpoint - some platforms check this
 app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
