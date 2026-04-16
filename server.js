@@ -36,30 +36,126 @@ const MODELS = [
   'llama-3.1-8b-instruct'
 ];
 
-// Safe JSON stringify — avoids circular reference crashes from axios errors
-function safeStringify(obj, depth = 2) {
+// Headers that must never appear in logs
+const SENSITIVE_HEADERS = new Set([
+  'authorization', 'cookie', 'set-cookie', 'x-api-key',
+  'proxy-authorization', 'www-authenticate'
+]);
+
+// Keys to skip on axios error internals to prevent deep dumps
+const SKIP_KEYS = new Set([
+  'socket', 'parser', 'client', '_redirectable', 'res', 'req',
+  'connection', '_events', '_eventsCount', 'outputData', 'output',
+  'outputSize', 'writable', 'readable', 'httpVersionMajor',
+  'httpVersionMinor', 'httpVersion', 'complete', 'rawHeaders',
+  'rawTrailers', 'trailers', 'trailersDistinct', 'headersDistinct',
+  '_consuming', '_dumped', 'upgrade', 'url', 'method',
+  'statusCode', 'statusMessage', '_currentRequest', '_currentUrl',
+  'autoSelectFamilyAttemptedAddresses', 'nativeProtocols',
+  'globalAgent', '_writableState', '_readableState', '_headers',
+  '_header', '_headerSent', '_pendingData', '_pendingEncoding',
+  '_socket', 'agent', 'agentKey', 'createConnection', 'defaultPort',
+  'family', 'host', 'hostname', 'path', 'protocol', 'keepAlive',
+  'keepAliveMsecs', 'maxSockets', 'maxFreeSockets', 'maxTotalSockets',
+  'scheduling', 'freeSockets', 'sockets', 'requests', 'options',
+  'pendingcb', 'corked', 'writelen', 'bufferedIndex', 'highWaterMark',
+  'length', 'totalSocketCount', 'agentKeepAliveTimeoutBuffer',
+  'noDelay', 'timeout', 'beforeRedirects', 'maxRedirects',
+  'maxBodyLength', 'sensitiveHeaders', 'pathname', 'redirects',
+  '_redirectCount', '_redirects', '_requestBodyLength',
+  '_requestBodyBuffers', '_ended', '_ending', '_headerFilter',
+  '_timeout', 'aborted', 'upgradeOrConnect', 'maxHeadersCount',
+  'reusedSocket', 'destroyed', '_dump', 'error'
+]);
+
+/**
+ * Depth-limited object sanitizer for safe logging.
+ * Properly tracks depth via recursion — NOT JSON.stringify's 3rd arg.
+ * Redacts sensitive headers, skips known deep internals, caps arrays.
+ */
+function sanitizeForLog(obj, maxDepth = 3) {
   const seen = new WeakSet();
-  try {
-    return JSON.stringify(obj, (key, value) => {
-      if (typeof value === 'object' && value !== null) {
-        if (seen.has(value)) return '[Circular]';
-        seen.add(value);
+
+  function prune(value, depth) {
+    if (depth > maxDepth) return '[...]';
+    if (value === null || value === undefined) return value;
+    if (typeof value !== 'object') return value;
+    if (seen.has(value)) return '[Circular]';
+    // Don't track depth-0 for the root itself
+    if (depth > 0) seen.add(value);
+
+    if (Array.isArray(value)) {
+      if (value.length > 10) {
+        return value.slice(0, 10).map(item => prune(item, depth + 1))
+          .concat([`... (${value.length} total)`]);
       }
-      return value;
-    }, depth);
+      return value.map(item => prune(item, depth + 1));
+    }
+
+    const result = {};
+    for (const key of Object.keys(value)) {
+      if (depth >= 1 && SKIP_KEYS.has(key)) continue;
+
+      // Redact sensitive headers at any depth
+      if (SENSITIVE_HEADERS.has(key.toLowerCase())) {
+        result[key] = '[REDACTED]';
+        continue;
+      }
+
+      // Special handling for nested headers objects
+      if (key.toLowerCase() === 'headers' &&
+          typeof value[key] === 'object' && value[key] !== null && !Array.isArray(value[key])) {
+        const sanitized = {};
+        for (const hk of Object.keys(value[key])) {
+          sanitized[hk] = SENSITIVE_HEADERS.has(hk.toLowerCase())
+            ? '[REDACTED]'
+            : prune(value[key][hk], depth + 2);
+        }
+        result[key] = sanitized;
+        continue;
+      }
+
+      result[key] = prune(value[key], depth + 1);
+    }
+    return result;
+  }
+
+  try {
+    return JSON.stringify(prune(obj, 0), null, 2);
   } catch (e) {
-    return String(obj);
+    return '[unstringifiable]';
   }
 }
 
-// Request logging
+/**
+ * Extract a clean, short error message from an axios error.
+ * NEVER stringifies the raw error object — pulls known fields only.
+ */
+function extractErrorMessage(err) {
+  if (err.response?.data) {
+    const d = err.response.data;
+    if (typeof d === 'string') return d.trim().slice(0, 500);
+    if (typeof d === 'object') {
+      return d.message || d.error?.message || d.detail || d.msg || d.error
+        ? (d.message || d.error?.message || d.detail || d.msg || String(d.error)).slice(0, 500)
+        : sanitizeForLog(d, 1).slice(0, 1000);
+    }
+    return String(d).slice(0, 500);
+  }
+  if (err.code) return `${err.code}: ${err.message || 'unknown'}`;
+  return (err.message || 'Unknown error').slice(0, 500);
+}
+
+// ── Request logging ──
 app.use('/v1/chat/completions', (req, res, next) => {
   console.log(`─── Incoming request ───`);
   console.log(`Model: ${req.body?.model || 'NONE'}`);
   console.log(`Stream: ${req.body?.stream}`);
   console.log(`Messages: ${req.body?.messages?.length || 0} messages`);
   const extras = Object.keys(req.body || {}).filter(k =>
-    !['model', 'messages', 'stream', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'stop', 'presence_penalty', 'frequency_penalty', 'seed', 'repetition_penalty'].includes(k)
+    !['model', 'messages', 'stream', 'temperature', 'top_p', 'max_tokens',
+      'max_completion_tokens', 'stop', 'presence_penalty', 'frequency_penalty',
+      'seed', 'repetition_penalty'].includes(k)
   );
   if (extras.length > 0) {
     console.log(`Stripping unsupported params: ${extras.join(', ')}`);
@@ -80,13 +176,8 @@ app.get('/v1/models', (req, res) => {
   res.json({
     object: 'list',
     data: MODELS.map(id => ({
-      id,
-      object: 'model',
-      created: Math.floor(Date.now() / 1000),
-      owned_by: 'nvidia',
-      permission: [],
-      root: id,
-      parent: null
+      id, object: 'model', created: Math.floor(Date.now() / 1000),
+      owned_by: 'nvidia', permission: [], root: id, parent: null
     }))
   });
 });
@@ -98,49 +189,35 @@ const ALLOWED_PARAMS = [
   'reasoning_effort'
 ];
 
-// Format an error response in OpenAI format so Chub/Janitor can display it
 function sendError(res, status, message, type = 'proxy_error') {
   if (!res.headersSent) {
-    res.status(status).json({
-      error: {
-        message,
-        type,
-        code: status
-      }
-    });
+    res.status(status).json({ error: { message, type, code: status } });
   } else {
     res.end();
   }
 }
 
+// ── Main completion endpoint ──
 app.post('/v1/chat/completions', async (req, res) => {
   const startTime = Date.now();
 
   try {
     const { model, messages, stream = false } = req.body;
 
-    if (!model) {
-      return sendError(res, 400, 'model is required', 'invalid_request_error');
-    }
-
+    if (!model) return sendError(res, 400, 'model is required', 'invalid_request_error');
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return sendError(res, 400, 'messages is required', 'invalid_request_error');
     }
 
-    // Map model name
+    // Model name mapping
     let nimModel = model;
-    if (model === 'kimi-k2-thinking') {
-      nimModel = 'moonshotai/kimi-k2-thinking';
-    }
+    if (model === 'kimi-k2-thinking') nimModel = 'moonshotai/kimi-k2-thinking';
 
-    // Build clean body
+    // Build clean forwarding body
     const nimBody = { model: nimModel, messages, stream };
-
     for (const key of ALLOWED_PARAMS) {
       if (key === 'model' || key === 'messages' || key === 'stream') continue;
-      if (req.body[key] !== undefined) {
-        nimBody[key] = req.body[key];
-      }
+      if (req.body[key] !== undefined) nimBody[key] = req.body[key];
     }
 
     if (nimBody.max_completion_tokens && !nimBody.max_tokens) {
@@ -157,6 +234,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       'Authorization': `Bearer ${NIM_API_KEY}`,
     };
 
+    // ── Streaming path ──
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -165,9 +243,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       try {
         const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimBody, {
-          headers,
-          responseType: 'stream',
-          timeout: 300000,
+          headers, responseType: 'stream', timeout: 300000,
         });
 
         console.log(`✅ Stream connected in ${Date.now() - startTime}ms`);
@@ -183,7 +259,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const parsed = JSON.parse(data);
                 if (parsed.choices?.[0]?.delta?.reasoning_content) return false;
                 if (parsed.choices?.[0]?.delta?.reasoning) return false;
-              } catch (e) {}
+              } catch (e) { /* keep unparseable lines */ }
               return true;
             });
             res.write(lines.join('\n') + '\n');
@@ -206,27 +282,26 @@ app.post('/v1/chat/completions', async (req, res) => {
       } catch (err) {
         const elapsed = Date.now() - startTime;
         const status = err.response?.status || 502;
-        const msg = err.response?.data
-          ? safeStringify(err.response.data)
-          : err.message;
+        const msg = extractErrorMessage(err);
+        console.error(`❌ Stream setup failed after ${elapsed}ms [${status}]: ${msg}`);
 
-        console.error(`❌ Stream setup failed after ${elapsed}ms [${status}]:`, msg);
-
-        // 404 = model not found on NIM
         if (status === 404) {
-          sendError(res, 404, `Model '${model}' not found on NVIDIA NIM. Available models: ${MODELS.join(', ')}`, 'model_not_found');
+          sendError(res, 404,
+            `Model '${model}' not found on NVIDIA NIM. Available: ${MODELS.join(', ')}`,
+            'model_not_found');
         } else if (status === 401) {
           sendError(res, 401, 'Invalid NIM API key', 'authentication_error');
+        } else if (status === 429) {
+          sendError(res, 429, 'NIM rate limit exceeded. Try again later.', 'rate_limit_error');
         } else {
           sendError(res, status, `NIM error: ${msg}`, 'upstream_error');
         }
       }
 
+    // ── Non-streaming path ──
     } else {
-      // ─── Non-streaming ───
       const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimBody, {
-        headers,
-        timeout: 300000,
+        headers, timeout: 300000,
       });
 
       console.log(`✅ Non-stream done in ${Date.now() - startTime}ms`);
@@ -250,16 +325,17 @@ app.post('/v1/chat/completions', async (req, res) => {
   } catch (err) {
     const elapsed = Date.now() - startTime;
     const status = err.response?.status || 500;
-    const msg = err.response?.data
-      ? safeStringify(err.response.data)
-      : err.message;
-
-    console.error(`❌ Request failed after ${elapsed}ms [${status}]:`, msg);
+    const msg = extractErrorMessage(err);
+    console.error(`❌ Request failed after ${elapsed}ms [${status}]: ${msg}`);
 
     if (status === 404) {
-      sendError(res, 404, `Model '${req.body?.model}' not found on NVIDIA NIM. Available: ${MODELS.join(', ')}`, 'model_not_found');
+      sendError(res, 404,
+        `Model '${req.body?.model}' not found on NVIDIA NIM. Available: ${MODELS.join(', ')}`,
+        'model_not_found');
     } else if (status === 401) {
       sendError(res, 401, 'Invalid NIM API key', 'authentication_error');
+    } else if (status === 429) {
+      sendError(res, 429, 'NIM rate limit exceeded. Try again later.', 'rate_limit_error');
     } else {
       sendError(res, status, `Proxy error: ${msg}`, 'proxy_error');
     }
@@ -270,6 +346,7 @@ app.use('*', (req, res) => {
   res.status(404).json({ error: { message: 'Not found', type: 'not_found' } });
 });
 
+// ── Server startup with retry ──
 function startServer(retries = 5, delay = 3000) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
@@ -289,7 +366,7 @@ function startServer(retries = 5, delay = 3000) {
         process.exit(1);
       }
     } else {
-      console.error('Server error:', err);
+      console.error('Server error:', err.message);
       process.exit(1);
     }
   });
