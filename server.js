@@ -25,31 +25,20 @@ const ENABLE_THINKING_MODE = false;
 // 🔒 MODELS WITH THINKING ALWAYS DISABLED (never send thinking parameter)
 // These models don't support thinking mode or perform worse with it enabled
 const DISABLED_THINKING_MODELS = [
-  'glm5',
-  'deepseek-v3.2',
-  'moonshotai/kimi-k2-thinking',
-  'mistral-large-3-675b-instruct-2512',
-  'gpt-4'
 ];
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
-  'qwen2': 'qwen/qwen3-coder-480b-a35b-instruct',
-  'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
-  'gpt-4o': 'deepseek-ai/deepseek-v3.1',
+  'nemotron-3-super-120b-a12b': 'nemotron-3-super-120b-a12b',
+  'gemma-4-31b-it': 'gemma-4-31b-it',
+  'kimi-k2.5': 'kimi-k2.5',
+  'deepseek-v3.2': 'deepseek-v3.2',
   'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
-  'claude-3-opus': 'openai/gpt-oss-120b',
-  'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemma': 'gemma-4-31b-it',
-  // 🔥 NOVOS MODELOS COM THINKING
-  'glm5': 'glm5',
-  'qwen': 'qwen/qwen3-next-80b-a3b-thinking',
-  'deepseek-thinking': 'deepseek-ai/deepseek-v3.1',
-  // 🔥 OUTROS MODELOS POPULARES
-  'llama-405b': 'meta/llama-3.1-405b-instruct',
-  'llama-70b': 'meta/llama-3.1-70b-instruct',
-  'mistral': 'mistralai/mistral-large-2-instruct'
+  'qwen3-next-80b-a3b-instruct': 'qwen3-next-80b-a3b-instruct',
+  'nemotron-3-super-120b-a12b': 'nemotron-3-super-120b-a12b',
+  'qwen3.5-397b-a17b': 'qwen3.5-397b-a17b',
+  'llama-3.3-70b-instruct': 'llama-3.3-70b-instruct',
+  'llama-3.1-8b-instruct': 'llama-3.1-8b-instruct'
 };
 
 // Health check endpoint
